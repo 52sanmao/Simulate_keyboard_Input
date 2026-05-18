@@ -4,23 +4,24 @@ import time
 import threading
 from tkinter import *
 from tkinter import scrolledtext, messagebox, filedialog, ttk
-from contextlib import contextmanager
 
-from pynput.keyboard import Controller, Key, KeyCode
 
 user32 = ctypes.windll.user32
+user32.VkKeyScanExW.argtypes = [ctypes.c_wchar, wintypes.HANDLE]
+user32.VkKeyScanExW.restype = ctypes.c_short
+user32.MapVirtualKeyW.argtypes = [ctypes.c_uint, ctypes.c_uint]
+user32.MapVirtualKeyW.restype = ctypes.c_uint
 user32.ActivateKeyboardLayout.argtypes = [wintypes.HANDLE, ctypes.c_uint]
 user32.ActivateKeyboardLayout.restype = wintypes.HANDLE
 kernel32 = ctypes.windll.kernel32
 imm32 = ctypes.windll.imm32
 imm32.ImmGetContext.argtypes = [wintypes.HWND]
 imm32.ImmGetContext.restype = wintypes.HANDLE
-imm32.ImmAssociateContextEx.argtypes = [wintypes.HWND, wintypes.HANDLE, wintypes.DWORD]
-imm32.ImmAssociateContextEx.restype = wintypes.BOOL
-imm32.ImmGetOpenStatus.argtypes = [wintypes.HANDLE]
-imm32.ImmGetOpenStatus.restype = wintypes.BOOL
 imm32.ImmSetOpenStatus.argtypes = [wintypes.HANDLE, wintypes.BOOL]
 imm32.ImmSetOpenStatus.restype = wintypes.BOOL
+
+_US_HKL = user32.LoadKeyboardLayoutW("00000409", 0x00000081)
+_VK_SHIFT = 0x10
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -34,184 +35,94 @@ MOD_NOREPEAT = 0x4000
 # ==============================================================================
 #  SendInputController: 使用 ctypes 和 SendInput 实现的底层键盘控制器
 # ==============================================================================
+# -----------------------------------------------------------------------------
+#  SendInputController: 纯 ctypes SendInput 底层键盘，不依赖 pynput 的 type()
+# -----------------------------------------------------------------------------
 class SendInputController:
-    """
-    一个使用 ctypes 调用 Windows SendInput API 的底层键盘模拟器。
-    它旨在替代 pynput，以绕过某些软件的检测。
-    """
-    def __init__(self):
-        # 定义Windows API结构体和常量
-        self.PUL = ctypes.POINTER(ctypes.c_ulong)
-        class KeyBdInput(ctypes.Structure):
-            _fields_ = [("wVk", ctypes.c_ushort),
-                        ("wScan", ctypes.c_ushort),
-                        ("dwFlags", ctypes.c_ulong),
-                        ("time", ctypes.c_ulong),
-                        ("dwExtraInfo", self.PUL)]
-        class HardwareInput(ctypes.Structure):
-            _fields_ = [("uMsg", ctypes.c_ulong),
-                        ("wParamL", ctypes.c_short),
-                        ("wParamH", ctypes.c_ushort)]
-        class MouseInput(ctypes.Structure):
-            _fields_ = [("dx", ctypes.c_long),
-                        ("dy", ctypes.c_long),
-                        ("mouseData", ctypes.c_ulong),
-                        ("dwFlags", ctypes.c_ulong),
-                        ("time", ctypes.c_ulong),
-                        ("dwExtraInfo", self.PUL)]
-        class Input_I(ctypes.Union):
-            _fields_ = [("ki", KeyBdInput),
-                        ("mi", MouseInput),
-                        ("hi", HardwareInput)]
-        class Input(ctypes.Structure):
+    KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_SCANCODE = 0x0008
+    INPUT_KEYBOARD = 1
+
+    @staticmethod
+    def _send(scancode, flags=0):
+        extra = ctypes.c_ulong(0)
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort),
+                        ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
+                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+        class INPUT(ctypes.Structure):
             _fields_ = [("type", ctypes.c_ulong),
-                        ("ii", Input_I)]
+                        ("ki", KEYBDINPUT)]
+        inp = INPUT(SendInputController.INPUT_KEYBOARD,
+                    KEYBDINPUT(0, scancode, flags | SendInputController.KEYEVENTF_SCANCODE, 0, ctypes.pointer(extra)))
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
-        self.Input = Input
-        self.KeyBdInput = KeyBdInput
-        self.Input_I = Input_I  # 添加这一行，解决 'Input_I' 属性缺失问题
-        
-        # 定义键盘事件常量
-        self.KEYEVENTF_KEYUP = 0x0002
-        self.KEYEVENTF_UNICODE = 0x0004
-        self.KEYEVENTF_SCANCODE = 0x0008
-        self.INPUT_KEYBOARD = 1
-        
-        # 虚拟键码 (Virtual-Key Codes)
-        # 完整的列表可以在微软文档中找到
-        self.VK_SHIFT = 0x10
-        self.VK_CONTROL = 0x11
-        self.VK_ALT = 0x12
-        self.VK_RETURN = 0x0D  # Enter
-        self.VK_TAB = 0x09
-        self.VK_HOME = 0x24
-        
-        # 字符到虚拟键码和是否需要Shift的映射
-        # 这个映射可以根据需要扩展
-        self.CHAR_MAP = {
-            'a': (0x41, False), 'b': (0x42, False), 'c': (0x43, False), 'd': (0x44, False),
-            'e': (0x45, False), 'f': (0x46, False), 'g': (0x47, False), 'h': (0x48, False),
-            'i': (0x49, False), 'j': (0x4A, False), 'k': (0x4B, False), 'l': (0x4C, False),
-            'm': (0x4D, False), 'n': (0x4E, False), 'o': (0x4F, False), 'p': (0x50, False),
-            'q': (0x51, False), 'r': (0x52, False), 's': (0x53, False), 't': (0x54, False),
-            'u': (0x55, False), 'v': (0x56, False), 'w': (0x57, False), 'x': (0x58, False),
-            'y': (0x59, False), 'z': (0x5A, False),
-            'A': (0x41, True), 'B': (0x42, True), 'C': (0x43, True), 'D': (0x44, True),
-            'E': (0x45, True), 'F': (0x46, True), 'G': (0x47, True), 'H': (0x48, True),
-            'I': (0x49, True), 'J': (0x4A, True), 'K': (0x4B, True), 'L': (0x4C, True),
-            'M': (0x4D, True), 'N': (0x4E, True), 'O': (0x4F, True), 'P': (0x50, True),
-            'Q': (0x51, True), 'R': (0x52, True), 'S': (0x53, True), 'T': (0x54, True),
-            'U': (0x55, True), 'V': (0x56, True), 'W': (0x57, True), 'X': (0x58, True),
-            'Y': (0x59, True), 'Z': (0x5A, True),
-            '0': (0x30, False), '1': (0x31, False), '2': (0x32, False), '3': (0x33, False),
-            '4': (0x34, False), '5': (0x35, False), '6': (0x36, False), '7': (0x37, False),
-            '8': (0x38, False), '9': (0x39, False),
-            ')': (0x30, True), '!': (0x31, True), '@': (0x32, True), '#': (0x33, True),
-            '$': (0x34, True), '%': (0x35, True), '^': (0x36, True), '&': (0x37, True),
-            '*': (0x38, True), '(': (0x39, True),
-            ' ': (0x20, False), ',': (0xBC, False), '.': (0xBE, False), '/': (0xBF, False),
-            ';': (0xBA, False), "'": (0xDE, False), '[': (0xDB, False), ']': (0xDD, False),
-            '\\': (0xDC, False), '-': (0xBD, False), '=': (0xBB, False),
-            '<': (0xBC, True), '>': (0xBE, True), '?': (0xBF, True), ':': (0xBA, True),
-            '"': (0xDE, True), '{': (0xDB, True), '}': (0xDD, True), '|': (0xDC, True),
-            '_': (0xBD, True), '+': (0xBB, True),
-            '`': (0xC0, False), '~': (0xC0, True),
-        }
+    @staticmethod
+    def send_key(vk, delay=0.01):
+        sc = user32.MapVirtualKeyW(vk, 0)
+        if not sc:
+            return
+        SendInputController._send(sc, 0)
+        time.sleep(delay)
+        SendInputController._send(sc, SendInputController.KEYEVENTF_KEYUP)
 
-    def _send_scancode(self, scan, flags):
-        """通过硬件扫描码发送按键事件（VM 兼容）"""
-        extra = ctypes.c_ulong(0)
-        ii = self.Input_I(ki=self.KeyBdInput(0, scan, flags | self.KEYEVENTF_SCANCODE, 0, ctypes.pointer(extra)))
-        x = self.Input(self.INPUT_KEYBOARD, ii)
-        ctypes.windll.user32.SendInput(1, ctypes.byref(x), ctypes.sizeof(x))
+    @staticmethod
+    def send_char(char, delay=0.01):
+        if char == "\n":
+            SendInputController.send_key(0x0D, delay)
+            return
+        code = user32.VkKeyScanExW(ctypes.c_wchar(char), _US_HKL)
+        if code == -1:
+            return
+        vk = code & 0xFF
+        shift = (code >> 8) & 0xFF
+        sc = user32.MapVirtualKeyW(vk, 0)
+        if not sc:
+            return
+        if shift & 1:
+            sc_sft = user32.MapVirtualKeyW(_VK_SHIFT, 0)
+            SendInputController._send(sc_sft, 0)
+            time.sleep(delay)
+        SendInputController._send(sc, 0)
+        time.sleep(delay)
+        SendInputController._send(sc, SendInputController.KEYEVENTF_KEYUP)
+        if shift & 1:
+            time.sleep(delay)
+            sc_sft = user32.MapVirtualKeyW(_VK_SHIFT, 0)
+            SendInputController._send(sc_sft, SendInputController.KEYEVENTF_KEYUP)
 
-    def _send_unicode_input(self, code, flags):
-        """通过 Unicode 码点直接发送，绕过键盘布局/IME"""
-        extra = ctypes.c_ulong(0)
-        ii = self.Input_I(ki=self.KeyBdInput(0, code, flags, 0, ctypes.pointer(extra)))
-        x = self.Input(self.INPUT_KEYBOARD, ii)
-        ctypes.windll.user32.SendInput(1, ctypes.byref(x), ctypes.sizeof(x))
+    @staticmethod
+    def press_vk(vk):
+        sc = user32.MapVirtualKeyW(vk, 0)
+        if sc:
+            SendInputController._send(sc, 0)
 
-    def type_unicode_char(self, char, delay=0.01):
-        """使用 KEYEVENTF_UNICODE 直输字符，彻底绕过 IME 和键盘布局"""
-        data = char.encode("utf-16-le")
-        for i in range(0, len(data), 2):
-            unit = data[i] | (data[i + 1] << 8)
-            self._send_unicode_input(unit, self.KEYEVENTF_UNICODE)
-            time.sleep(delay / 2)
-            self._send_unicode_input(unit, self.KEYEVENTF_UNICODE | self.KEYEVENTF_KEYUP)
-            time.sleep(delay / 2)
+    @staticmethod
+    def release_vk(vk):
+        sc = user32.MapVirtualKeyW(vk, 0)
+        if sc:
+            SendInputController._send(sc, SendInputController.KEYEVENTF_KEYUP)
 
     @staticmethod
     def guard_ime():
-        """关闭 IME 并切换到 US 英文键盘布局"""
         state = {}
         hwnd = user32.GetForegroundWindow()
         hIMC = imm32.ImmGetContext(hwnd)
         if hIMC:
-            state["hwnd"] = hwnd
             state["hIMC"] = hIMC
             state["open"] = imm32.ImmGetOpenStatus(hIMC)
             imm32.ImmSetOpenStatus(hIMC, False)
-        state["hkl"] = user32.ActivateKeyboardLayout(0x04090409, 0x00000008)
+        state["hkl"] = user32.ActivateKeyboardLayout(0x04090409, 0x00000101)
         return state
 
     @staticmethod
     def restore_ime(state):
-        """恢复 IME 和键盘布局"""
         hkl = state.get("hkl")
         if hkl:
-            user32.ActivateKeyboardLayout(hkl, 0x00000008)
+            user32.ActivateKeyboardLayout(hkl, 0x00000101)
         hIMC = state.get("hIMC")
         if hIMC and state.get("open"):
             imm32.ImmSetOpenStatus(hIMC, True)
-
-    def press_key(self, vk_code):
-        """按下指定的虚拟键"""
-        scan = ctypes.windll.user32.MapVirtualKeyW(vk_code, 0)
-        self._send_scancode(scan, 0)
-
-    def release_key(self, vk_code):
-        """释放指定的虚拟键"""
-        scan = ctypes.windll.user32.MapVirtualKeyW(vk_code, 0)
-        self._send_scancode(scan, self.KEYEVENTF_KEYUP)
-
-    def type_key(self, vk_code, delay=0.01):
-        """完整地敲击一次指定的虚拟键（按下后释放）"""
-        self.press_key(vk_code)
-        time.sleep(delay)
-        self.release_key(vk_code)
-
-    def type_char(self, char, delay=0.01):
-        """输入一个字符，能自动处理Shift键"""
-        if char in self.CHAR_MAP:
-            vk_code, needs_shift = self.CHAR_MAP[char]
-            if needs_shift:
-                self.press_key(self.VK_SHIFT)
-                time.sleep(delay)
-                self.type_key(vk_code, delay)
-                time.sleep(delay)
-                self.release_key(self.VK_SHIFT)
-            else:
-                self.type_key(vk_code, delay)
-        # 对于不在映射表中的特殊字符，可以添加更多处理逻辑
-        # else:
-        #     print(f"Warning: Character '{char}' not in map.")
-
-    @contextmanager
-    def pressed(self, *vk_codes):
-        """
-        一个上下文管理器，用于模拟按住一个或多个键。
-        完美替代 pynput 的 with keyboard.pressed(...) 写法。
-        """
-        for code in vk_codes:
-            self.press_key(code)
-        try:
-            yield
-        finally:
-            # 以相反的顺序释放按键
-            for code in reversed(vk_codes):
-                self.release_key(code)
 
 
 # ==============================================================================
@@ -604,10 +515,6 @@ class KeyboardSimulator:
             release_keys = self.current_hotkey_config["release_keys"]
         self.simulate_input(skip_start_delay=True, release_keys=release_keys)
 
-    def release_hotkey_keys(self, keyboard, release_keys):
-        for vk_code in reversed(release_keys):
-            keyboard.release(KeyCode.from_vk(vk_code))
-
     def wait_with_stop(self, delay_seconds):
         if delay_seconds <= 0:
             return True
@@ -650,49 +557,20 @@ class KeyboardSimulator:
             messagebox.showwarning("输入警告", "请输入要模拟的内容。")
             self.finish_simulation()
             return
-        
-        # 回退到旧版 pynput 的实现，以支持中文
-        keyboard = Controller()
 
         start_delay = 0 if skip_start_delay else self.delay_var.get()
         char_delay = self.interval_var.get()
-        
+
         total_chars = repetitions * len(text_content)
         self.progress['maximum'] = total_chars
         self.progress['value'] = 0
 
         newline_mode = self.newline_mode_var.get()
 
-        def do_newline():
-            if newline_mode == "普通使用Enter换行":
-                keyboard.press(Key.enter)
-                keyboard.release(Key.enter)
-
-            elif newline_mode == "使用Shift+Enter换行":
-                with keyboard.pressed(Key.shift):
-                    keyboard.press(Key.enter)
-                    keyboard.release(Key.enter)
-
-            elif newline_mode == "换行后10次Shift+Tab":
-                keyboard.press(Key.enter)
-                keyboard.release(Key.enter)
-                time.sleep(char_delay)
-                for _ in range(10):
-                    if self.stop_event.is_set(): break
-                    with keyboard.pressed(Key.shift):
-                        keyboard.press(Key.tab)
-                        keyboard.release(Key.tab)
-                    time.sleep(char_delay)
-
-            elif newline_mode == "换行后2次Home回到行首":
-                keyboard.press(Key.enter)
-                keyboard.release(Key.enter)
-                time.sleep(char_delay)
-                for _ in range(2):
-                    if self.stop_event.is_set(): break
-                    keyboard.press(Key.home)
-                    keyboard.release(Key.home)
-                    time.sleep(char_delay)
+        _VK_RETURN = 0x0D
+        _VK_SHIFT = 0x10
+        _VK_TAB = 0x09
+        _VK_HOME = 0x24
 
         ime_state = None
 
@@ -703,7 +581,8 @@ class KeyboardSimulator:
                     return
 
                 if release_keys:
-                    self.release_hotkey_keys(keyboard, release_keys)
+                    for vk_code in reversed(release_keys):
+                        SendInputController.release_vk(vk_code)
 
                 ime_state = SendInputController.guard_ime()
 
@@ -711,11 +590,28 @@ class KeyboardSimulator:
                     if self.stop_event.is_set(): break
                     for char in text_content:
                         if self.stop_event.is_set(): break
-                        
+
                         if char == "\n":
-                            do_newline()
+                            if newline_mode == "普通使用Enter换行":
+                                SendInputController.send_key(_VK_RETURN, char_delay)
+                            elif newline_mode == "使用Shift+Enter换行":
+                                SendInputController.press_vk(_VK_SHIFT)
+                                SendInputController.send_key(_VK_RETURN, char_delay)
+                                SendInputController.release_vk(_VK_SHIFT)
+                            elif newline_mode == "换行后10次Shift+Tab":
+                                SendInputController.send_key(_VK_RETURN, char_delay)
+                                for _ in range(10):
+                                    if self.stop_event.is_set(): break
+                                    SendInputController.press_vk(_VK_SHIFT)
+                                    SendInputController.send_key(_VK_TAB, char_delay)
+                                    SendInputController.release_vk(_VK_SHIFT)
+                            elif newline_mode == "换行后2次Home回到行首":
+                                SendInputController.send_key(_VK_RETURN, char_delay)
+                                for _ in range(2):
+                                    if self.stop_event.is_set(): break
+                                    SendInputController.send_key(_VK_HOME, char_delay)
                         else:
-                            keyboard.type(char)
+                            SendInputController.send_char(char, char_delay)
 
                         self.window.after(0, self.progress.step, 1)
                         time.sleep(char_delay)

@@ -1,0 +1,39 @@
+name: Build EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install pynput pyinstaller
+
+      - name: Build EXE
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name 模拟键盘输入小工具 --distpath dist --workpath build 模拟键盘输入小工具.py
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimulateKeyboardInput
+          path: dist/模拟键盘输入小工具.exe
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: v1.5
+          name: 模拟键盘输入小工具 v1.5
+          body: 修复中文输入法下大小写跟随输入法、符号>><<无法输入、:变成;的问题
+          files: dist/模拟键盘输入小工具.exe
+          make_latest: true

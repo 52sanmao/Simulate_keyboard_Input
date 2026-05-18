@@ -15,6 +15,8 @@ imm32.ImmGetContext.argtypes = [wintypes.HWND]
 imm32.ImmGetContext.restype = wintypes.HANDLE
 imm32.ImmAssociateContextEx.argtypes = [wintypes.HWND, wintypes.HANDLE, wintypes.DWORD]
 imm32.ImmAssociateContextEx.restype = wintypes.BOOL
+imm32.ImmSetOpenStatus.argtypes = [wintypes.HANDLE, wintypes.BOOL]
+imm32.ImmSetOpenStatus.restype = wintypes.BOOL
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -143,18 +145,20 @@ class SendInputController:
             time.sleep(delay / 2)
 
     def guard_ime(self):
-        """临时断开前台窗口的 IME 关联，返回 (hwnd, hIMC) 用于恢复"""
+        """关闭 IME 并断开窗口关联，返回 (hwnd, hIMC) 用于恢复"""
         hwnd = user32.GetForegroundWindow()
         hIMC = imm32.ImmGetContext(hwnd)
         if hIMC:
+            imm32.ImmSetOpenStatus(hIMC, False)
             imm32.ImmAssociateContextEx(hwnd, None, 0)
         return hwnd, hIMC
 
     @staticmethod
     def restore_ime(hwnd, hIMC):
-        """恢复 IME 关联"""
+        """恢复 IME"""
         if hwnd and hIMC:
             imm32.ImmAssociateContextEx(hwnd, hIMC, 0)
+            imm32.ImmSetOpenStatus(hIMC, True)
 
     def press_key(self, vk_code):
         """按下指定的虚拟键"""
@@ -703,11 +707,13 @@ class KeyboardSimulator:
                         
                         if char == "\n":
                             do_newline()
+                        elif char in si.CHAR_MAP:
+                            si.type_char(char, char_delay)
                         else:
                             keyboard.type(char)
+                            time.sleep(char_delay)
 
                         self.window.after(0, self.progress.step, 1)
-                        time.sleep(char_delay)
 
                     if not self.stop_event.is_set():
                         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')

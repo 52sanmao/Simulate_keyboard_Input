@@ -5,23 +5,29 @@ import threading
 from tkinter import *
 from tkinter import scrolledtext, messagebox, filedialog, ttk
 
+from pynput.keyboard import Controller, Key, KeyCode
 
 user32 = ctypes.windll.user32
-user32.VkKeyScanExW.argtypes = [ctypes.c_wchar, wintypes.HANDLE]
-user32.VkKeyScanExW.restype = ctypes.c_short
-user32.MapVirtualKeyW.argtypes = [ctypes.c_uint, ctypes.c_uint]
-user32.MapVirtualKeyW.restype = ctypes.c_uint
-user32.ActivateKeyboardLayout.argtypes = [wintypes.HANDLE, ctypes.c_uint]
-user32.ActivateKeyboardLayout.restype = wintypes.HANDLE
 kernel32 = ctypes.windll.kernel32
 imm32 = ctypes.windll.imm32
+
+# ---------------------------------------------------------------------------
+# Win32 API argtypes
+# ---------------------------------------------------------------------------
+user32.ActivateKeyboardLayout.argtypes = [wintypes.HANDLE, ctypes.c_uint]
+user32.ActivateKeyboardLayout.restype = wintypes.HANDLE
+
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = wintypes.HWND
+
 imm32.ImmGetContext.argtypes = [wintypes.HWND]
 imm32.ImmGetContext.restype = wintypes.HANDLE
+
 imm32.ImmSetOpenStatus.argtypes = [wintypes.HANDLE, wintypes.BOOL]
 imm32.ImmSetOpenStatus.restype = wintypes.BOOL
 
-_US_HKL = user32.LoadKeyboardLayoutW("00000409", 0x00000081)
-_VK_SHIFT = 0x10
+imm32.ImmGetOpenStatus.argtypes = [wintypes.HANDLE]
+imm32.ImmGetOpenStatus.restype = wintypes.BOOL
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -33,76 +39,9 @@ MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 
 # ==============================================================================
-#  SendInputController: 使用 ctypes 和 SendInput 实现的底层键盘控制器
+#  SendInputController: 底层 SendInput + 硬件扫描码，完全绕过 IME
 # ==============================================================================
-# -----------------------------------------------------------------------------
-#  SendInputController: 纯 ctypes SendInput 底层键盘，不依赖 pynput 的 type()
-# -----------------------------------------------------------------------------
 class SendInputController:
-    KEYEVENTF_KEYUP = 0x0002
-    KEYEVENTF_SCANCODE = 0x0008
-    INPUT_KEYBOARD = 1
-
-    @staticmethod
-    def _send(scancode, flags=0):
-        extra = ctypes.c_ulong(0)
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort),
-                        ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
-                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-        class INPUT(ctypes.Structure):
-            _fields_ = [("type", ctypes.c_ulong),
-                        ("ki", KEYBDINPUT)]
-        inp = INPUT(SendInputController.INPUT_KEYBOARD,
-                    KEYBDINPUT(0, scancode, flags | SendInputController.KEYEVENTF_SCANCODE, 0, ctypes.pointer(extra)))
-        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
-
-    @staticmethod
-    def send_key(vk, delay=0.01):
-        sc = user32.MapVirtualKeyW(vk, 0)
-        if not sc:
-            return
-        SendInputController._send(sc, 0)
-        time.sleep(delay)
-        SendInputController._send(sc, SendInputController.KEYEVENTF_KEYUP)
-
-    @staticmethod
-    def send_char(char, delay=0.01):
-        if char == "\n":
-            SendInputController.send_key(0x0D, delay)
-            return
-        code = user32.VkKeyScanExW(ctypes.c_wchar(char), _US_HKL)
-        if code == -1:
-            return
-        vk = code & 0xFF
-        shift = (code >> 8) & 0xFF
-        sc = user32.MapVirtualKeyW(vk, 0)
-        if not sc:
-            return
-        if shift & 1:
-            sc_sft = user32.MapVirtualKeyW(_VK_SHIFT, 0)
-            SendInputController._send(sc_sft, 0)
-            time.sleep(delay)
-        SendInputController._send(sc, 0)
-        time.sleep(delay)
-        SendInputController._send(sc, SendInputController.KEYEVENTF_KEYUP)
-        if shift & 1:
-            time.sleep(delay)
-            sc_sft = user32.MapVirtualKeyW(_VK_SHIFT, 0)
-            SendInputController._send(sc_sft, SendInputController.KEYEVENTF_KEYUP)
-
-    @staticmethod
-    def press_vk(vk):
-        sc = user32.MapVirtualKeyW(vk, 0)
-        if sc:
-            SendInputController._send(sc, 0)
-
-    @staticmethod
-    def release_vk(vk):
-        sc = user32.MapVirtualKeyW(vk, 0)
-        if sc:
-            SendInputController._send(sc, SendInputController.KEYEVENTF_KEYUP)
-
     @staticmethod
     def guard_ime():
         state = {}
@@ -558,6 +497,7 @@ class KeyboardSimulator:
             self.finish_simulation()
             return
 
+        keyboard = Controller()
         start_delay = 0 if skip_start_delay else self.delay_var.get()
         char_delay = self.interval_var.get()
 
@@ -567,10 +507,33 @@ class KeyboardSimulator:
 
         newline_mode = self.newline_mode_var.get()
 
-        _VK_RETURN = 0x0D
-        _VK_SHIFT = 0x10
-        _VK_TAB = 0x09
-        _VK_HOME = 0x24
+        def do_newline():
+            if newline_mode == "普通使用Enter换行":
+                keyboard.press(Key.enter)
+                keyboard.release(Key.enter)
+            elif newline_mode == "使用Shift+Enter换行":
+                with keyboard.pressed(Key.shift):
+                    keyboard.press(Key.enter)
+                    keyboard.release(Key.enter)
+            elif newline_mode == "换行后10次Shift+Tab":
+                keyboard.press(Key.enter)
+                keyboard.release(Key.enter)
+                time.sleep(char_delay)
+                for _ in range(10):
+                    if self.stop_event.is_set(): break
+                    with keyboard.pressed(Key.shift):
+                        keyboard.press(Key.tab)
+                        keyboard.release(Key.tab)
+                    time.sleep(char_delay)
+            elif newline_mode == "换行后2次Home回到行首":
+                keyboard.press(Key.enter)
+                keyboard.release(Key.enter)
+                time.sleep(char_delay)
+                for _ in range(2):
+                    if self.stop_event.is_set(): break
+                    keyboard.press(Key.home)
+                    keyboard.release(Key.home)
+                    time.sleep(char_delay)
 
         ime_state = None
 
@@ -582,7 +545,7 @@ class KeyboardSimulator:
 
                 if release_keys:
                     for vk_code in reversed(release_keys):
-                        SendInputController.release_vk(vk_code)
+                        keyboard.release(KeyCode.from_vk(vk_code))
 
                 ime_state = SendInputController.guard_ime()
 
@@ -592,26 +555,9 @@ class KeyboardSimulator:
                         if self.stop_event.is_set(): break
 
                         if char == "\n":
-                            if newline_mode == "普通使用Enter换行":
-                                SendInputController.send_key(_VK_RETURN, char_delay)
-                            elif newline_mode == "使用Shift+Enter换行":
-                                SendInputController.press_vk(_VK_SHIFT)
-                                SendInputController.send_key(_VK_RETURN, char_delay)
-                                SendInputController.release_vk(_VK_SHIFT)
-                            elif newline_mode == "换行后10次Shift+Tab":
-                                SendInputController.send_key(_VK_RETURN, char_delay)
-                                for _ in range(10):
-                                    if self.stop_event.is_set(): break
-                                    SendInputController.press_vk(_VK_SHIFT)
-                                    SendInputController.send_key(_VK_TAB, char_delay)
-                                    SendInputController.release_vk(_VK_SHIFT)
-                            elif newline_mode == "换行后2次Home回到行首":
-                                SendInputController.send_key(_VK_RETURN, char_delay)
-                                for _ in range(2):
-                                    if self.stop_event.is_set(): break
-                                    SendInputController.send_key(_VK_HOME, char_delay)
+                            do_newline()
                         else:
-                            SendInputController.send_char(char, char_delay)
+                            keyboard.type(char)
 
                         self.window.after(0, self.progress.step, 1)
                         time.sleep(char_delay)

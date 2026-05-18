@@ -11,6 +11,10 @@ from pynput.keyboard import Controller, Key, KeyCode
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 imm32 = ctypes.windll.imm32
+imm32.ImmGetContext.argtypes = [wintypes.HWND]
+imm32.ImmGetContext.restype = wintypes.HANDLE
+imm32.ImmAssociateContextEx.argtypes = [wintypes.HWND, wintypes.HANDLE, wintypes.DWORD]
+imm32.ImmAssociateContextEx.restype = wintypes.BOOL
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -142,7 +146,8 @@ class SendInputController:
         """临时断开前台窗口的 IME 关联，返回 (hwnd, hIMC) 用于恢复"""
         hwnd = user32.GetForegroundWindow()
         hIMC = imm32.ImmGetContext(hwnd)
-        imm32.ImmAssociateContextEx(hwnd, 0, 0)
+        if hIMC:
+            imm32.ImmAssociateContextEx(hwnd, None, 0)
         return hwnd, hIMC
 
     @staticmethod
@@ -699,9 +704,10 @@ class KeyboardSimulator:
                         if char == "\n":
                             do_newline()
                         else:
-                            si.type_unicode_char(char, char_delay)
+                            keyboard.type(char)
 
                         self.window.after(0, self.progress.step, 1)
+                        time.sleep(char_delay)
 
                     if not self.stop_event.is_set():
                         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')

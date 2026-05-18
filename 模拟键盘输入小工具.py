@@ -116,16 +116,10 @@ class SendInputController:
             '`': (0xC0, False), '~': (0xC0, True),
         }
 
-    def _send_input_event(self, vk, flags):
-        """底层的事件发送函数"""
-        scan_code = ctypes.windll.user32.MapVirtualKeyW(vk, 0)
-        # 如果使用 wScan, dwFlags 要包含 KEYEVENTF_SCANCODE
-        # ii = self.Input_I(ki=self.KeyBdInput(0, scan_code, flags | self.KEYEVENTF_SCANCODE, 0, self.PUL(0)))
-        
-        # 直接使用 wVk 更简单
-        # 修复类型错误：将整数0转换为c_ulong后再创建指针
+    def _send_scancode(self, scan, flags):
+        """通过硬件扫描码发送按键事件（VM 兼容）"""
         extra = ctypes.c_ulong(0)
-        ii = self.Input_I(ki=self.KeyBdInput(vk, 0, flags, 0, ctypes.pointer(extra)))
+        ii = self.Input_I(ki=self.KeyBdInput(0, scan, flags | self.KEYEVENTF_SCANCODE, 0, ctypes.pointer(extra)))
         x = self.Input(self.INPUT_KEYBOARD, ii)
         ctypes.windll.user32.SendInput(1, ctypes.byref(x), ctypes.sizeof(x))
 
@@ -166,11 +160,13 @@ class SendInputController:
 
     def press_key(self, vk_code):
         """按下指定的虚拟键"""
-        self._send_input_event(vk_code, 0)
+        scan = ctypes.windll.user32.MapVirtualKeyW(vk_code, 0)
+        self._send_scancode(scan, 0)
 
     def release_key(self, vk_code):
         """释放指定的虚拟键"""
-        self._send_input_event(vk_code, self.KEYEVENTF_KEYUP)
+        scan = ctypes.windll.user32.MapVirtualKeyW(vk_code, 0)
+        self._send_scancode(scan, self.KEYEVENTF_KEYUP)
 
     def type_key(self, vk_code, delay=0.01):
         """完整地敲击一次指定的虚拟键（按下后释放）"""
@@ -711,11 +707,13 @@ class KeyboardSimulator:
                         
                         if char == "\n":
                             do_newline()
+                        elif char in si.CHAR_MAP:
+                            si.type_char(char, char_delay)
                         else:
                             keyboard.type(char)
+                            time.sleep(char_delay)
 
                         self.window.after(0, self.progress.step, 1)
-                        time.sleep(char_delay)
 
                     if not self.stop_event.is_set():
                         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')

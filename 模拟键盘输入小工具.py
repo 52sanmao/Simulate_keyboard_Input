@@ -9,16 +9,18 @@ from contextlib import contextmanager
 from pynput.keyboard import Controller, Key, KeyCode
 
 user32 = ctypes.windll.user32
+user32.ActivateKeyboardLayout.argtypes = [wintypes.HANDLE, ctypes.c_uint]
+user32.ActivateKeyboardLayout.restype = wintypes.HANDLE
 kernel32 = ctypes.windll.kernel32
 imm32 = ctypes.windll.imm32
 imm32.ImmGetContext.argtypes = [wintypes.HWND]
 imm32.ImmGetContext.restype = wintypes.HANDLE
 imm32.ImmAssociateContextEx.argtypes = [wintypes.HWND, wintypes.HANDLE, wintypes.DWORD]
 imm32.ImmAssociateContextEx.restype = wintypes.BOOL
-imm32.ImmGetConversionStatus.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)]
-imm32.ImmGetConversionStatus.restype = wintypes.BOOL
-imm32.ImmSetConversionStatus.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
-imm32.ImmSetConversionStatus.restype = wintypes.BOOL
+imm32.ImmGetOpenStatus.argtypes = [wintypes.HANDLE]
+imm32.ImmGetOpenStatus.restype = wintypes.BOOL
+imm32.ImmSetOpenStatus.argtypes = [wintypes.HANDLE, wintypes.BOOL]
+imm32.ImmSetOpenStatus.restype = wintypes.BOOL
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -140,23 +142,29 @@ class SendInputController:
             self._send_unicode_input(unit, self.KEYEVENTF_UNICODE | self.KEYEVENTF_KEYUP)
             time.sleep(delay / 2)
 
-    def guard_ime(self):
-        """保存 IME 转换状态并切换到英文模式"""
+    @staticmethod
+    def guard_ime():
+        """关闭 IME 并切换到 US 英文键盘布局"""
+        state = {}
         hwnd = user32.GetForegroundWindow()
         hIMC = imm32.ImmGetContext(hwnd)
         if hIMC:
-            conv = wintypes.DWORD()
-            sent = wintypes.DWORD()
-            imm32.ImmGetConversionStatus(hIMC, ctypes.byref(conv), ctypes.byref(sent))
-            imm32.ImmSetConversionStatus(hIMC, 0, 0)
-            return hwnd, hIMC, conv.value
-        return hwnd, hIMC, None
+            state["hwnd"] = hwnd
+            state["hIMC"] = hIMC
+            state["open"] = imm32.ImmGetOpenStatus(hIMC)
+            imm32.ImmSetOpenStatus(hIMC, False)
+        state["hkl"] = user32.ActivateKeyboardLayout(0x04090409, 0x00000008)
+        return state
 
     @staticmethod
-    def restore_ime(hwnd, hIMC, conv):
-        """恢复 IME 到之前的转化状态"""
-        if hwnd and hIMC and conv is not None:
-            imm32.ImmSetConversionStatus(hIMC, conv, 0)
+    def restore_ime(state):
+        """恢复 IME 和键盘布局"""
+        hkl = state.get("hkl")
+        if hkl:
+            user32.ActivateKeyboardLayout(hkl, 0x00000008)
+        hIMC = state.get("hIMC")
+        if hIMC and state.get("open"):
+            imm32.ImmSetOpenStatus(hIMC, True)
 
     def press_key(self, vk_code):
         """按下指定的虚拟键"""
@@ -686,7 +694,6 @@ class KeyboardSimulator:
                     keyboard.release(Key.home)
                     time.sleep(char_delay)
 
-        si = SendInputController()
         ime_state = None
 
         def simulate_input_thread():
@@ -698,7 +705,7 @@ class KeyboardSimulator:
                 if release_keys:
                     self.release_hotkey_keys(keyboard, release_keys)
 
-                ime_state = si.guard_ime()
+                ime_state = SendInputController.guard_ime()
 
                 for _ in range(repetitions):
                     if self.stop_event.is_set(): break
@@ -707,13 +714,11 @@ class KeyboardSimulator:
                         
                         if char == "\n":
                             do_newline()
-                        elif char in si.CHAR_MAP:
-                            si.type_char(char, char_delay)
                         else:
                             keyboard.type(char)
-                            time.sleep(char_delay)
 
                         self.window.after(0, self.progress.step, 1)
+                        time.sleep(char_delay)
 
                     if not self.stop_event.is_set():
                         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -722,7 +727,7 @@ class KeyboardSimulator:
                         self.window.after(0, self.update_record_text, record_line)
             finally:
                 if ime_state:
-                    si.restore_ime(*ime_state)
+                    SendInputController.restore_ime(ime_state)
                 if self.clear_text_var.get():
                     self.window.after(0, self.text.delete, '1.0', 'end')
                 self.window.after(0, self.finish_simulation)

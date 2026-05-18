@@ -15,8 +15,10 @@ imm32.ImmGetContext.argtypes = [wintypes.HWND]
 imm32.ImmGetContext.restype = wintypes.HANDLE
 imm32.ImmAssociateContextEx.argtypes = [wintypes.HWND, wintypes.HANDLE, wintypes.DWORD]
 imm32.ImmAssociateContextEx.restype = wintypes.BOOL
-imm32.ImmSetOpenStatus.argtypes = [wintypes.HANDLE, wintypes.BOOL]
-imm32.ImmSetOpenStatus.restype = wintypes.BOOL
+imm32.ImmGetConversionStatus.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)]
+imm32.ImmGetConversionStatus.restype = wintypes.BOOL
+imm32.ImmSetConversionStatus.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
+imm32.ImmSetConversionStatus.restype = wintypes.BOOL
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -145,20 +147,22 @@ class SendInputController:
             time.sleep(delay / 2)
 
     def guard_ime(self):
-        """关闭 IME 并断开窗口关联，返回 (hwnd, hIMC) 用于恢复"""
+        """保存 IME 转换状态并切换到英文模式"""
         hwnd = user32.GetForegroundWindow()
         hIMC = imm32.ImmGetContext(hwnd)
         if hIMC:
-            imm32.ImmSetOpenStatus(hIMC, False)
-            imm32.ImmAssociateContextEx(hwnd, None, 0)
-        return hwnd, hIMC
+            conv = wintypes.DWORD()
+            sent = wintypes.DWORD()
+            imm32.ImmGetConversionStatus(hIMC, ctypes.byref(conv), ctypes.byref(sent))
+            imm32.ImmSetConversionStatus(hIMC, 0, 0)
+            return hwnd, hIMC, conv.value
+        return hwnd, hIMC, None
 
     @staticmethod
-    def restore_ime(hwnd, hIMC):
-        """恢复 IME"""
-        if hwnd and hIMC:
-            imm32.ImmAssociateContextEx(hwnd, hIMC, 0)
-            imm32.ImmSetOpenStatus(hIMC, True)
+    def restore_ime(hwnd, hIMC, conv):
+        """恢复 IME 到之前的转化状态"""
+        if hwnd and hIMC and conv is not None:
+            imm32.ImmSetConversionStatus(hIMC, conv, 0)
 
     def press_key(self, vk_code):
         """按下指定的虚拟键"""
@@ -687,10 +691,10 @@ class KeyboardSimulator:
                     time.sleep(char_delay)
 
         si = SendInputController()
-        ime_guard = None
+        ime_state = None
 
         def simulate_input_thread():
-            nonlocal ime_guard
+            nonlocal ime_state
             try:
                 if not self.wait_with_stop(start_delay):
                     return
@@ -698,7 +702,7 @@ class KeyboardSimulator:
                 if release_keys:
                     self.release_hotkey_keys(keyboard, release_keys)
 
-                ime_guard = si.guard_ime()
+                ime_state = si.guard_ime()
 
                 for _ in range(repetitions):
                     if self.stop_event.is_set(): break
@@ -707,13 +711,11 @@ class KeyboardSimulator:
                         
                         if char == "\n":
                             do_newline()
-                        elif char in si.CHAR_MAP:
-                            si.type_char(char, char_delay)
                         else:
                             keyboard.type(char)
-                            time.sleep(char_delay)
 
                         self.window.after(0, self.progress.step, 1)
+                        time.sleep(char_delay)
 
                     if not self.stop_event.is_set():
                         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -721,8 +723,8 @@ class KeyboardSimulator:
                         self.records.append(record_line)
                         self.window.after(0, self.update_record_text, record_line)
             finally:
-                if ime_guard:
-                    si.restore_ime(*ime_guard)
+                if ime_state:
+                    si.restore_ime(*ime_state)
                 if self.clear_text_var.get():
                     self.window.after(0, self.text.delete, '1.0', 'end')
                 self.window.after(0, self.finish_simulation)

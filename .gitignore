@@ -1,1 +1,4 @@
 .vscode/settings.json
+Simulate_keyboard_Input.exe
+__pycache__/
+artifacts*/
